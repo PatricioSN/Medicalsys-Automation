@@ -218,3 +218,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# PyCharm
+.idea/
+
+# Privacy and Security: raw HTML, screenshots, credentials, logs
+*.html
+*.htm
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.log
+*.key
+*.pem
+*credential*
+*secret*
+.env*
+logs/
+reports/
