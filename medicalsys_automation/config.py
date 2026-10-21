@@ -4,23 +4,18 @@
 CDP_PORT = 9222
 CDP_URL = f"http://localhost:{CDP_PORT}"
 
-# Trecho da URL ou título usado para identificar a aba correta do Medicalsys no navegador
-# Exemplos observados na aplicação:
-# - 'softon.tec.br'
-# - 'pagina=paciente'
-# - 'pagina=ficha'
-URL_SUBSTRING = "softon.tec.br"
+# Trecho da URL usado para identificar a aba do Medicalsys no navegador
+URL_SUBSTRING = "medicalsys.com.br"
 
-# Lista de status disponíveis no sistema Medicalsys (texto exato exibido no site).
-# Ajuste conforme o texto exato apresentado na tela do seu ambiente.
+# Lista oficial dos 7 status disponíveis no Medicalsys (texto exato exibido no site)
 STATUS_OPTIONS = [
-    "AGUARDANDO ATENDIMENTO",
-    "EM ATENDIMENTO",
-    "ATENDIDO",
-    "FINALIZADO",
-    "CANCELADO",
-    "FALTOU",
-    "EM TRIAGEM",
+    "Agendado",
+    "Aguardando",
+    "Confirmado",
+    "Não compareceu",
+    "Finalizado",
+    "Remarcado",
+    "Cancelado",
 ]
 
 # Trava de segurança para desenvolvimento e homologação:
