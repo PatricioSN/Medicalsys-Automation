@@ -42,7 +42,6 @@ def mark_duplicate_names(patients: List[PatientItem]) -> None:
 
     Nomes repetidos sem ID estável são marcados preventivamente para revisão manual.
     """
-    # Conta repetições de nomes normalizados
     counts = Counter(p.name.strip().upper() for p in patients)
 
     for p in patients:
@@ -50,6 +49,16 @@ def mark_duplicate_names(patients: List[PatientItem]) -> None:
         if not p.stable_id and counts[norm_name] > 1:
             p.manual_review = True
             p.review_reason = "Nome duplicado na lista sem identificador estável único"
+
+
+def mark_unregistered_patients(patients: List[PatientItem], target_status: str) -> None:
+    """Identifica pacientes provisórios (não cadastrados) para status que exigem cadastro."""
+    # O Medicalsys exige cadastro prévio para definir Aguardando ou Finalizado
+    if target_status.strip().lower() in ["aguardando", "finalizado"]:
+        for p in patients:
+            if "não cadastrado" in p.name.lower() or "nao cadastrado" in p.name.lower():
+                p.manual_review = True
+                p.review_reason = f"Paciente provisório (não cadastrado) - requer cadastro prévio para status '{target_status}'"
 
 
 def show_preview_and_confirm(patients: List[PatientItem], target_status: str) -> bool:
@@ -67,8 +76,13 @@ def show_preview_and_confirm(patients: List[PatientItem], target_status: str) ->
         print(f"  - {status}: {count} paciente(s)")
 
     already_target = status_counts.get(target_status, 0)
-    print(f"\nPacientes que já estão no status de destino (serão ignorados): {already_target}")
-    print(f"Pacientes candidatos a alteração                             : {total - already_target}")
+    manual_pre_marked = sum(1 for p in patients if p.manual_review and p.current_status != target_status)
+    candidates = total - already_target - manual_pre_marked
+
+    print(f"\nPacientes que já estão no status de destino (serão ignorados)   : {already_target}")
+    if manual_pre_marked > 0:
+        print(f"Pacientes com pendência (não cadastrados / duplicados)          : {manual_pre_marked}")
+    print(f"Pacientes aptos para alteração imediata                         : {max(0, candidates)}")
     print("=" * 78)
 
     resposta = input("\nDigite 'sim' para confirmar e iniciar a alteração (qualquer outra resposta cancela): ")
@@ -122,19 +136,20 @@ def run_status_update(page: Page, target_status: str) -> None:
     try:
         patients = read_all_patients(page)
     except Exception as e:
-        print(f"\n[ERRO] Falha ao ler registros da tabela: {e}")
+        print(f"\n[ERRO] Falha ao ler registros: {e}")
         return
 
     if not patients:
-        print("\nNenhum paciente foi encontrado na visualização atual da tabela.")
+        print("\nNenhum paciente foi encontrado na visualização atual.")
         return
 
     # Verificação de segurança de DEV_PREFIX
     if not check_dev_safety(patients):
         return
 
-    # Marcação de duplicidades sem ID único
+    # Marcação preventiva de duplicidades e pacientes provisórios
     mark_duplicate_names(patients)
+    mark_unregistered_patients(patients, target_status)
 
     # Prévia e confirmação
     if not show_preview_and_confirm(patients, target_status):
@@ -148,7 +163,7 @@ def run_status_update(page: Page, target_status: str) -> None:
         if not stop_requested:
             stop_requested = True
             print("\n\n[Ctrl+C detectado] Interrupção solicitada!")
-            print("Aguardando a conclusão do salvamento do paciente em andamento antes de parar...\n")
+            print("Aguardando a conclusão do paciente em andamento antes de parar...\n")
         else:
             print("\n[Ctrl+C forçado] Encerrando imediatamente.")
             sys.exit(1)
@@ -213,9 +228,7 @@ def run_status_update(page: Page, target_status: str) -> None:
                     break
 
     finally:
-        # Restaura o handler original de SIGINT
         signal.signal(signal.SIGINT, original_sigint)
-        # Exibe o relatório com anon_ids
         print_final_report(
             total=total_processed,
             target_status=target_status,

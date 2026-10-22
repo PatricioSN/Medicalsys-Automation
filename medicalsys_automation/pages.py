@@ -3,6 +3,7 @@
 Centraliza todas as interações com o DOM utilizando get_by_role, get_by_label,
 get_by_text e seletores semânticos com esperas explícitas do Playwright.
 Suporta tanto a visualização em Agenda/Calendário (FullCalendar) quanto em Tabela.
+Trata especificamente a confirmação de presença no modalConfirmar para o status Aguardando.
 """
 
 from dataclasses import dataclass
@@ -60,12 +61,52 @@ def read_calendar_patients(page: Page) -> List[PatientItem]:
     return patients
 
 
-def change_calendar_patient_status(page: Page, patient: PatientItem, target_status: str) -> bool:
-    """Altera o status de um agendamento na tela de Agenda/Calendário com espera de rede."""
-    # Garante que popovers anteriores estejam fechados
-    page.evaluate("() => { if (window.closePopover) window.closePopover(); if (window.fecharPopovers) window.fecharPopovers(); }")
+def _force_close_all_overlays(page: Page) -> None:
+    """Fecha à força popovers, dropdowns Select2 e modais remanescentes."""
+    page.evaluate("""() => {
+        // Fecha popovers do Bootstrap
+        if (window.closePopover) window.closePopover();
+        if (window.fecharPopovers) window.fecharPopovers();
+        // Fecha qualquer dropdown Select2 aberto
+        if (window.jQuery) {
+            $('.select2-container--open').removeClass('select2-container--open');
+            $('.select2-dropdown').remove();
+        }
+    }""")
+    # Pressiona Escape para garantir fechamento de modais/dropdowns via teclado
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    page.wait_for_timeout(400)
 
-    # 1. Localiza o card do evento no calendário
+
+def _wait_for_popover_ready(page: Page) -> bool:
+    """Aguarda o popover estar aberto E o Select2 interno já estar renderizado e pronto."""
+    try:
+        # 1. Aguarda a classe .in do Bootstrap (popover completamente visível)
+        page.wait_for_selector(".popover.in", state="visible", timeout=DEFAULT_TIMEOUT_MS)
+        # 2. Aguarda o Select2 container dentro do popover estar presente e visível
+        page.wait_for_selector(".popover.in .select2-container", state="visible", timeout=DEFAULT_TIMEOUT_MS)
+        # 3. Aguarda o Select2 container estar renderizado com o texto corrente (não em branco)
+        page.wait_for_function(
+            """() => {
+                const sel = document.querySelector('.popover.in .select2-selection__rendered');
+                return sel && sel.innerText.trim().length > 0;
+            }""",
+            timeout=DEFAULT_TIMEOUT_MS
+        )
+        return True
+    except Exception:
+        return False
+
+
+def change_calendar_patient_status(page: Page, patient: PatientItem, target_status: str) -> bool:
+    """Altera o status de um agendamento na Agenda/Calendário, tratando a confirmação de presença."""
+    # 0. Limpeza total: fecha qualquer overlay aberto antes de iniciar
+    _force_close_all_overlays(page)
+
+    # 1. Localiza o card do evento no calendário pelo nome do paciente
     event_loc = page.locator(".fc-event").filter(has_text=patient.name)
     if event_loc.count() == 0 and patient.stable_id:
         event_loc = page.locator(f".fc-event:has-text('{patient.name[:15]}')")
@@ -73,61 +114,53 @@ def change_calendar_patient_status(page: Page, patient: PatientItem, target_stat
     if event_loc.count() == 0:
         return False
 
-    # Rola até o card se necessário e clica para abrir o popover
+    # Clica no evento para abrir o popover (sem scroll_into_view para não mover a página desnecessariamente)
     target_event = event_loc.first
-    target_event.scroll_into_view_if_needed()
     target_event.click()
 
-    # 2. Aguarda o popover abrir
-    popover = page.locator(".popover.in, .popover").first
+    # 2. Aguarda o popover estar totalmente pronto (aberto + Select2 renderizado com conteúdo)
+    if not _wait_for_popover_ready(page):
+        _force_close_all_overlays(page)
+        return False
+
+    popover = page.locator(".popover.in")
+
+    # 3. Abre o dropdown Select2 de status
+    select2_container = popover.locator(".select2-container").first
+    select2_container.click()
+
+    # Aguarda as opções ficarem visíveis na tela
     try:
-        popover.wait_for(state="visible", timeout=DEFAULT_TIMEOUT_MS)
+        page.wait_for_selector(".select2-results__option", state="visible", timeout=DEFAULT_TIMEOUT_MS)
     except Exception:
+        _force_close_all_overlays(page)
         return False
 
-    # 3. Localiza o componente de seleção de status no popover
-    select2_container = popover.locator(".select2-container")
-    native_select = popover.locator("select#opcoesAgendamento, select#status-agendamento")
+    # 4. Verifica se a opção de destino existe (pode estar bloqueada para pacientes não cadastrados)
+    results = page.locator(".select2-results__option")
+    options_texts = [results.nth(i).inner_text().strip() for i in range(results.count())]
 
-    if select2_container.count() > 0 and select2_container.first.is_visible():
-        # Clica no container do Select2 para abrir a lista suspensa
-        select2_container.first.click()
-
-        # Aguarda as opções do Select2 ficarem visíveis
-        results_option = page.locator(".select2-results__option")
-        try:
-            results_option.first.wait_for(state="visible", timeout=DEFAULT_TIMEOUT_MS)
-        except Exception:
-            page.evaluate("() => { if (window.closePopover) window.closePopover(); if (window.fecharPopovers) window.fecharPopovers(); }")
-            return False
-
-        # Localiza a opção pelo texto exato
-        target_option = results_option.filter(has_text=target_status).first
-        if target_option.count() == 0:
-            # Opção não permitida para o estado atual deste agendamento
-            page.evaluate("() => { if (window.closePopover) window.closePopover(); if (window.fecharPopovers) window.fecharPopovers(); }")
-            return False
-
-        # Clica na opção aguardando a resposta da requisição AJAX de alteração
-        try:
-            with page.expect_response(lambda r: "alterar_situacao" in r.url or "agenda" in r.url, timeout=DEFAULT_TIMEOUT_MS):
-                target_option.click()
-        except Exception:
-            # Fallback se a requisição não casar a URL exata
-            pass
-
-    elif native_select.count() > 0:
-        try:
-            with page.expect_response(lambda r: "alterar_situacao" in r.url or "agenda" in r.url, timeout=DEFAULT_TIMEOUT_MS):
-                native_select.first.select_option(label=target_status, timeout=DEFAULT_TIMEOUT_MS)
-        except Exception:
-            return False
-    else:
-        # Popover sem campo de status disponível (ex: consulta bloqueada/finalizada)
-        page.evaluate("() => { if (window.closePopover) window.closePopover(); if (window.fecharPopovers) window.fecharPopovers(); }")
+    if target_status not in options_texts:
+        # Status indisponível para este paciente
+        _force_close_all_overlays(page)
         return False
 
-    # 4. Aguarda a confirmação de persistência no FullCalendar
+    # 5. Clica na opção desejada
+    page.locator(".select2-results__option").filter(has_text=target_status).first.click()
+
+    # 6. Tratamento especial: modal "CONFIRMAR PRESENÇA" (obrigatório para status Aguardando)
+    if target_status.strip().lower() == "aguardando":
+        try:
+            btn_confirmar = page.locator("#btn-confirma-presenca")
+            btn_confirmar.wait_for(state="visible", timeout=DEFAULT_TIMEOUT_MS)
+            btn_confirmar.click()
+            # Aguarda o modal sumir
+            page.wait_for_selector(".modal.in", state="hidden", timeout=DEFAULT_TIMEOUT_MS)
+        except Exception:
+            _force_close_all_overlays(page)
+            return False
+
+    # 7. Aguarda a confirmação de persistência no FullCalendar
     persisted = False
     try:
         page.wait_for_function(
@@ -142,7 +175,7 @@ def change_calendar_patient_status(page: Page, patient: PatientItem, target_stat
         )
         persisted = True
     except Exception:
-        # Confere fallback no estado do evento
+        # Fallback: relê o status direto do FullCalendar
         current_status = page.evaluate("""(id) => {
             if (!window.jQuery || !$('#calendar').fullCalendar) return null;
             const ev = $('#calendar').fullCalendar('clientEvents').find(e => String(e.id) === String(id));
@@ -151,8 +184,8 @@ def change_calendar_patient_status(page: Page, patient: PatientItem, target_stat
         if current_status and current_status.strip().lower() == target_status.strip().lower():
             persisted = True
 
-    # 5. Fecha qualquer popover remanescente
-    page.evaluate("() => { if (window.closePopover) window.closePopover(); if (window.fecharPopovers) window.fecharPopovers(); }")
+    # 8. Limpeza final antes de passar para o próximo paciente
+    _force_close_all_overlays(page)
 
     return persisted
 
